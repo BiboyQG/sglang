@@ -69,7 +69,10 @@ The maintained tests define the supported first-version scope:
 - [`test/test_simulation_offline_blocking.py`](test/test_simulation_offline_blocking.py):
   equivalent logical results in `OFFLINE` and `BLOCKING` modes;
 - [`test/test_simulation_cache_hit_ratio.py`](test/test_simulation_cache_hit_ratio.py):
-  reusable-prefix accounting and cache-tier hit metrics across repeated runs.
+  reusable-prefix accounting and cache-tier hit metrics across repeated runs;
+- [`test/test_simulation_offline_repeatable.py`](test/test_simulation_offline_repeatable.py):
+  identical `request.jsonl` (apart from the generated request ids) across
+  repeated `OFFLINE` runs with `scheduler.cpu_overhead_s` set.
 
 From `tools/sglang-simulator`:
 
@@ -199,6 +202,9 @@ A simulator configuration has three sections:
   AIConfigurator context parallelism. `cp_style` uses the AIConfigurator values
   such as `none`, `allgather`, `ulysses`, or `ring`. Decode-only `dcp_size` has no
   separate AIConfigurator field and is not modeled yet.
+  `cpu_overhead_s` (optional, seconds) is the scheduler overhead charged to the
+  `OFFLINE` clock after every pass; unset, the measured host time is charged, so
+  repeated runs of one trace differ. `BLOCKING` mode ignores it.
 
 ### Prefix-cache accuracy
 

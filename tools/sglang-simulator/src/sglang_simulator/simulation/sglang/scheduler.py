@@ -102,7 +102,8 @@ class ReqDispatcher:
         self.immediate_release_requests = []
         self.future_queue: list[
             tuple[float, int, Any]
-        ] = []  # tuple(created time, salt, request)
+        ] = []  # tuple(created time, arrival sequence, request)
+        self.arrival_seq = 0
         self.offline_recv_all_requests = False
         self.profile_active = False
 
@@ -121,6 +122,7 @@ class ReqDispatcher:
     def reset(self) -> None:
         self.immediate_release_requests.clear()
         self.future_queue.clear()
+        self.arrival_seq = 0
         self.offline_recv_all_requests = False
 
     def add(self, reqs: list):
@@ -158,11 +160,12 @@ class ReqDispatcher:
                         "Add request to waiting queue with custom queue start timestamp."
                     )
 
+                self.arrival_seq += 1
                 self.future_queue.append(
                     (
                         sim_params.get("queue_start")
                         or self.simulation_created_time_s(sim_params),
-                        time.time_ns(),  # The request is not comparable, so add the salt to avoid comparison.
+                        self.arrival_seq,  # ties keep arrival order; requests are not comparable
                         req,
                     )
                 )
@@ -281,6 +284,7 @@ class C_SchedulerHook(BaseHook):
 
     SIMULATION_BATCH: SimulationScheduleBatch = None
     OVERLAP_SCHEDULE: bool = False
+    CPU_OVERHEAD_S = None  # sim_config scheduler.cpu_overhead_s; None = measured host time
     SIM_MODE = SimulationMode(Envs.simulation_mode())
     # Shared singleton instance with `C_SchedulerRequestReceiver.REQ_DISPATCHER`.
     REQ_DISPATCHER = ReqDispatcher(SIM_MODE)
@@ -339,6 +343,8 @@ class C_SchedulerHook(BaseHook):
                     )
                     ConfigManager.set_scheduler_config(sched_config)
                 sched_config = ConfigManager.get_scheduler_config()
+                if C_SchedulerHook.SIM_MODE == SimulationMode.OFFLINE:
+                    C_SchedulerHook.CPU_OVERHEAD_S = sched_config.cpu_overhead_s
 
                 C_SchedulerHook.INFERENCE_PREDICTOR = (
                     ConfigManager.get_inference_time_predictor(model, hw, sched_config)
@@ -503,10 +509,12 @@ class C_SchedulerHook(BaseHook):
                 # Step CPU overhead BEFORE recording latencies,
                 # so current iter's CPU time is reflected in current iter's TTFT.
                 now = time.time()
-                cpu_overhead = max(
-                    now - StateManager.get_last_real_time_ts() - blocked_l2_wall_dur,
-                    0.0,
-                )
+                cpu_overhead = C_SchedulerHook.CPU_OVERHEAD_S
+                if cpu_overhead is None:
+                    cpu_overhead = max(
+                        now - StateManager.get_last_real_time_ts() - blocked_l2_wall_dur,
+                        0.0,
+                    )
                 StateManager.step_global_clock(cpu_overhead)
                 StateManager.set_last_real_time_ts(now)
 

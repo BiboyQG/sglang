@@ -47,6 +47,10 @@ class SchedulerConfig:
     backend_name: str = "sglang"
     backend_version: Optional[str] = None
 
+    # Scheduler overhead charged to the OFFLINE clock per pass, in seconds. None
+    # charges the measured host time, so repeated runs of one trace differ.
+    cpu_overhead_s: Optional[float] = None
+
     @property
     def attn_tp_size(self) -> int:
         divisor = self.dp_size * self.cp_size

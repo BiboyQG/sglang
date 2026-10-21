@@ -62,7 +62,14 @@ def run_simulator_scheduler_process(*args, **kwargs):
 
     # Spawned workers do not inherit parent-process monkey patches, so import
     # the scheduler only after installing hooks in this process.
+    from sglang.srt.distributed import bootstrap
     from sglang.srt.managers.scheduler import run_scheduler_process
+
+    # The simulator stubs the sgl-kernel op loader, so torch.ops.sgl_kernel has
+    # no ops. The AMX path probes for an op before using the ops; the arm64 path
+    # checks only the machine type and would call init_cpu_threads_env, so
+    # clear its flag (already False on x86).
+    bootstrap._is_cpu_arm64 = False
 
     return run_scheduler_process(*args, **kwargs)
 

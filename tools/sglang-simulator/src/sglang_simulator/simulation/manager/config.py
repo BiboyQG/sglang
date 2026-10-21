@@ -133,6 +133,7 @@ class ConfigManager:
             "moe_quant_mode_override",
             "fmha_quant_mode_override",
             "comm_quant_mode_override",
+            "cpu_overhead_s",
         ]:
             field_value = external_config.get(field_name)
             if field_value is not None:

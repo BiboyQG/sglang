@@ -73,12 +73,17 @@ The maintained tests define the supported first-version scope:
 - [`test/test_simulation_offline_repeatable.py`](test/test_simulation_offline_repeatable.py):
   identical `request.jsonl` (apart from the generated request ids) across
   repeated `OFFLINE` runs with `scheduler.cpu_overhead_s` set.
+- [`test/test_simulation_closed_loop.py`](test/test_simulation_closed_loop.py):
+  closed-loop sessions in the runner path: a later turn arrives `think_time_s` after
+  the previous turn finished, open-loop requests are unaffected, runs repeat, and a
+  turn without its predecessor is rejected.
 
 From `tools/sglang-simulator`:
 
 ```bash
 python3 -m pytest -q test/test_simulation_sglang_runner.py
 python3 -m pytest -q test/test_simulation_sglang_serving.py
+python3 -m pytest -q test/test_simulation_closed_loop.py
 ```
 
 Read these tests as the minimal maintained examples for constructing a dataset,
@@ -245,6 +250,25 @@ The Autobench trace format uses timestamps in milliseconds:
 
 Random and ShareGPT workloads are also supported by the runner API and serving
 benchmark paths.
+
+## Closed-loop sessions
+
+The runner path (`SGLangBenchmarkRunner`, `OFFLINE` mode) replays traces whose requests
+form sessions. Give a `GenericRequest` the custom params `session_id`, `turn`
+(0, 1, 2, ... within the session) and, for `turn > 0`, `think_time_s`. Turn 0 arrives
+at its `created_time`; turn k > 0 is held by the scheduler and arrives `think_time_s`
+after turn k - 1 finished, on the logical clock, whatever `created_time` it carries.
+Requests without `session_id` stay open loop, and the two kinds mix. The release time
+depends only on the logical clock, so runs repeat exactly when
+`scheduler.cpu_overhead_s` is set. Every session must contain turns 0 ... k - 1 for
+each turn k it has; the runner rejects a turn whose predecessor is missing.
+`request.jsonl` records `session_id` and `turn`. The hold and release live in the
+scheduler, so they also apply to requests that reach an `OFFLINE` server over HTTP
+with these simulation params; only the runner validates the input, and an HTTP client
+that sends a turn without its predecessor stalls the simulation. A client that sends
+each later turn itself after the previous response cannot drive an `OFFLINE` server,
+which starts simulating only once every expected request has arrived. `BLOCKING` mode
+ignores the three params: every request is released when it arrives, as before.
 
 ## Validation
 

@@ -70,6 +70,10 @@ class SGLangBenchmarkRunner(BaseBenchmarkRunner):
                 "total_request": len(dataset),  # Include the warmup requests.
                 "created_time": created_time,
             }
+            # Closed-loop sessions: turn k > 0 is released think_time_s after turn k - 1 finishes.
+            for key in ("session_id", "turn", "think_time_s"):
+                if key in req.custom_params:
+                    simulation_params[key] = req.custom_params[key]
 
             yield (req, simulation_params)
 
@@ -78,6 +82,23 @@ class SGLangBenchmarkRunner(BaseBenchmarkRunner):
         benchmark_config: BenchmarkConfig,
         dataset: BaseDataset,
     ):
+        # Closed-loop sessions: a later turn needs its session, its think time and its predecessor,
+        # or the scheduler would hold it forever.
+        turns = set()
+        for req in dataset:
+            params = req.custom_params
+            if any(key in params for key in ("session_id", "turn", "think_time_s")):
+                if "session_id" not in params:
+                    raise ValueError(f"request with turn/think_time_s but no session_id: {params}")
+                if params.get("turn", 0) > 0 and "think_time_s" not in params:
+                    raise ValueError(f"turn {params['turn']} of session {params['session_id']!r} has no think_time_s")
+                turns.add((params["session_id"], params.get("turn", 0)))
+        for session_id, turn in turns:
+            if turn > 0 and (session_id, turn - 1) not in turns:
+                raise ValueError(
+                    f"session {session_id!r} has turn {turn} but no turn {turn - 1}; it would never be released"
+                )
+
         await self.engine.tokenizer_manager.start_profile()
 
         if os.path.exists(SIMULATION_METRICS_PATH):

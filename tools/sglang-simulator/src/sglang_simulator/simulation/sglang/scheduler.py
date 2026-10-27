@@ -221,19 +221,29 @@ class ReqDispatcher:
                         f"Offline simulation mode enabled. {self.total_request} requests expected in total. Received {self.received} requests so far."
                     )
 
+    def attach_after_finish(self, req) -> None:
+        """Put the request's after_finish (how the step ended: finish reason, tool categories) on
+        the scheduler's Req. Called right before the request's KV cache is released, so a policy
+        that decides at release time what to keep can read it."""
+        sim_params = (req.sampling_params.custom_params or {}).get("simulation")
+        if not sim_params or sim_params.get("session_id") is None:
+            return
+        after_finish = self.after_finish.pop(
+            (sim_params["session_id"], sim_params.get("step", 0)), None
+        )
+        if after_finish is not None:
+            req.after_finish = after_finish
+
     def on_finished(self, req, finished_at: float) -> None:
-        """A request finished at logical time `finished_at`: attach its after_finish and release
-        the requests whose predecessors have now all finished, each at the latest of
-        (predecessor finish + gap). `req` is the scheduler's Req, whose sampling params carry
-        the simulation parameters the request was submitted with."""
+        """A request finished at logical time `finished_at`: release the requests whose
+        predecessors have now all finished, each at the latest of (predecessor finish + gap).
+        `req` is the scheduler's Req, whose sampling params carry the simulation parameters the
+        request was submitted with."""
         sim_params = (req.sampling_params.custom_params or {}).get("simulation")
         if not sim_params or sim_params.get("session_id") is None:
             return
         key = (sim_params["session_id"], sim_params.get("step", 0))
         self.finished_at[key] = finished_at
-        after_finish = self.after_finish.pop(key, None)
-        if after_finish is not None:
-            req.after_finish = after_finish
         for dependent in self.dependents.pop(key, ()):
             waiting_req, gaps = self.waiting[dependent]
             if any(predecessor not in self.finished_at for predecessor in gaps):
@@ -722,6 +732,19 @@ class C_SchedulerHook(BaseHook):
                         _request_dispatcher._mapping[ty] = override_profile
             return ret
 
+        # The scheduler releases a finished request's KV cache inside process_batch_result, before
+        # on_finished runs; after_finish goes on the Req just before that release, where a policy
+        # deciding what to keep can read it.
+        batch_result_processor = importlib.import_module(
+            "sglang.srt.managers.scheduler_components.batch_result_processor"
+        )
+        original_release_kv_cache = batch_result_processor.release_kv_cache
+
+        def wrapped_release_kv_cache(req, tree_cache, *, checkpoint):
+            cls.REQ_DISPATCHER.attach_after_finish(req)
+            return original_release_kv_cache(req, tree_cache, checkpoint=checkpoint)
+
+        batch_result_processor.release_kv_cache = wrapped_release_kv_cache
         target.event_loop_overlap = override_event_loop_overlap
         target.__init__ = wrapped_init
         target.get_new_batch_prefill = wrapped_get_new_batch_prefill

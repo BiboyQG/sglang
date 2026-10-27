@@ -70,6 +70,10 @@ class SGLangBenchmarkRunner(BaseBenchmarkRunner):
                 "total_request": len(dataset),  # Include the warmup requests.
                 "created_time": created_time,
             }
+            # Closed-loop sessions: a request with wait_for is released once its predecessors finished.
+            for key in ("session_id", "step", "trigger", "wait_for", "after_finish"):
+                if key in req.custom_params:
+                    simulation_params[key] = req.custom_params[key]
 
             yield (req, simulation_params)
 
@@ -78,6 +82,45 @@ class SGLangBenchmarkRunner(BaseBenchmarkRunner):
         benchmark_config: BenchmarkConfig,
         dataset: BaseDataset,
     ):
+        # Closed-loop sessions: every predecessor must be in the dataset and the waits must not form
+        # a cycle, or the scheduler would hold a request forever.
+        keys = set()
+        waits = {}
+        for req in dataset:
+            params = req.custom_params
+            if "session_id" in params:
+                key = (params["session_id"], params.get("step", 0))
+                if key in keys:
+                    raise ValueError(f"two requests have the key {key}")
+                keys.add(key)
+            elif params.get("wait_for"):
+                raise ValueError(f"request with wait_for but no session_id: {params}")
+            if params.get("wait_for"):
+                waits[key] = {(p["session_id"], p["step"]) for p in params["wait_for"]}
+                if any(p["gap_s"] < 0 for p in params["wait_for"]):
+                    raise ValueError(
+                        f"{key} has a negative gap_s: {params['wait_for']}"
+                    )
+        dependents = {}
+        for key, predecessors in waits.items():
+            for predecessor in predecessors:
+                if predecessor not in keys:
+                    raise ValueError(
+                        f"{key} waits for {predecessor}, which is not in the dataset; it would never be released"
+                    )
+                dependents.setdefault(predecessor, []).append(key)
+        remaining = {key: len(predecessors) for key, predecessors in waits.items()}
+        released = [key for key in keys if key not in waits]
+        while released:
+            for dependent in dependents.get(released.pop(), ()):
+                remaining[dependent] -= 1
+                if remaining[dependent] == 0:
+                    released.append(dependent)
+        if any(remaining.values()):
+            raise ValueError(
+                f"waits form a cycle: {sorted(key for key, n in remaining.items() if n)}"
+            )
+
         await self.engine.tokenizer_manager.start_profile()
 
         if os.path.exists(SIMULATION_METRICS_PATH):

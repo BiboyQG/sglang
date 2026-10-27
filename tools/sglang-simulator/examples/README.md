@@ -6,8 +6,8 @@ The example assets are organized by purpose:
 - `assets/`: the small illustrative ML model, replay table, and test tokenizer;
 - `workloads/`: ShareGPT and timestamped simulator/Autobench workload examples;
 
-The ML model is an illustrative constant-latency sklearn model, not a calibrated
-hardware predictor. Rebuild it and the tokenizer with:
+The ML model is the trainer's HistGradientBoosting model fitted on its 14 example
+steps, not a calibrated hardware predictor. Rebuild it and the tokenizer with:
 
 ```bash
 python3 examples/build_example_assets.py

@@ -57,5 +57,8 @@ Point the simulator configuration at the selected bundle:
 ```
 
 Use the same scikit-learn version for training and inference, and load only
-trusted joblib files. Before production use, validate the selected model on
+trusted joblib files. The simulator does not call the model's `predict`: it walks
+the fitted trees from their node arrays, which depends on the scikit-learn tree
+layout (verified identical to `predict` with scikit-learn 1.9.1); re-verify the
+`test_train_latency_model.py` equality check after a scikit-learn upgrade. Before production use, validate the selected model on
 independent step data and complete simulator workloads.

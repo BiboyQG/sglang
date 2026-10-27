@@ -73,12 +73,23 @@ The maintained tests define the supported first-version scope:
 - [`test/test_simulation_offline_repeatable.py`](test/test_simulation_offline_repeatable.py):
   identical `request.jsonl` (apart from the generated request ids) across
   repeated `OFFLINE` runs with `scheduler.cpu_overhead_s` set.
+- [`test/test_simulation_closed_loop.py`](test/test_simulation_closed_loop.py):
+  closed-loop sessions in the runner path: a step arrives its gap after its
+  predecessors finished (a chain, and a fan-out into sub-sessions that joins back),
+  open-loop requests are unaffected, runs repeat, and a dataset whose waits are
+  incomplete or cyclic is rejected.
+- [`test/test_req_dispatcher.py`](test/test_req_dispatcher.py): the hold and
+  release of requests with predecessors, driven without an engine: release times,
+  the order of requests released together, `req.after_finish`, and that the
+  replay-control params never stay on a request.
 
 From `tools/sglang-simulator`:
 
 ```bash
 python3 -m pytest -q test/test_simulation_sglang_runner.py
 python3 -m pytest -q test/test_simulation_sglang_serving.py
+python3 -m pytest -q test/test_simulation_closed_loop.py
+python3 -m pytest -q test/test_req_dispatcher.py
 ```
 
 Read these tests as the minimal maintained examples for constructing a dataset,
@@ -245,6 +256,42 @@ The Autobench trace format uses timestamps in milliseconds:
 
 Random and ShareGPT workloads are also supported by the runner API and serving
 benchmark paths.
+
+## Closed-loop sessions
+
+The runner path (`SGLangBenchmarkRunner`, `OFFLINE` mode) replays traces whose requests
+depend on each other. Give a `GenericRequest` the custom params `session_id` and `step`
+(together its key) and, for a request that follows others, `wait_for`: a list of
+`{"session_id", "step", "gap_s"}`, one entry per predecessor. A request without
+`wait_for` arrives at its `created_time`; a request with `wait_for` is held by the
+scheduler until every predecessor finished and then arrives at the latest of
+(predecessor finish + `gap_s`), on the logical clock, whatever `created_time` it
+carries. A chain of turns has one predecessor per step; a step that resumes after
+sub-sessions lists the last step of each of them. Requests without `session_id` stay
+open loop, and the two kinds mix. The release time depends only on the logical clock,
+so runs repeat exactly when `scheduler.cpu_overhead_s` is set.
+
+Two more custom params are optional. `trigger` is a label (for example `root`, `user`,
+`tool`, `subagent`) copied to `request.jsonl` next to `session_id` and `step`.
+`after_finish` is a dict that the scheduler attaches to the request as
+`req.after_finish` when the request finished, the way a real server knows at that
+moment whether the reply calls a tool. It is set after the scheduler processed the
+request's last token, that is after the request's KV was released and its output
+streamed, so code that decides at KV release time cannot read it.
+`wait_for` and `after_finish` never reach the scheduler's `Req`: the dispatcher removes
+them from the simulation params when the request is received, so a scheduling policy
+sees only what a real server would.
+
+The runner rejects a dataset whose waits name a key that is not in it, form a cycle,
+carry a negative `gap_s`, or come without a `session_id`, and a dataset in which two
+requests share a key. The hold and
+release live in the scheduler, so they also apply to requests that reach an `OFFLINE`
+server over HTTP with these simulation params; only the runner validates the input,
+and an HTTP client that sends a request whose predecessor never arrives stalls the
+simulation. A client that sends each later step itself after the previous response
+cannot drive an `OFFLINE` server, which starts simulating only once every expected
+request has arrived. `BLOCKING` mode ignores these params: every request is released
+when it arrives, as before.
 
 ## Validation
 

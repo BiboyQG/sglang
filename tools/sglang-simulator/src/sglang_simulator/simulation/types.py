@@ -87,6 +87,11 @@ class SimulationMode(Enum):
 @dataclass(slots=True)
 class RequestStats:
     rid: str = ""
+    # Closed-loop session replay: the request's session, step and what triggered it;
+    # None / 0 / None for open-loop requests.
+    session_id: Optional[str] = None
+    step: int = 0
+    trigger: Optional[str] = None
     last_event_time: float = 0.0
     input_length: int = 1
     output_length: int = 1

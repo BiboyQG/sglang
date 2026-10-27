@@ -104,6 +104,21 @@ class ReqDispatcher:
             tuple[float, int, Any]
         ] = []  # tuple(created time, arrival sequence, request)
         self.arrival_seq = 0
+        # Closed-loop sessions: a request with predecessors waits here, keyed by (session_id, step),
+        # until every predecessor finished; it then joins the future queue at the latest of
+        # (predecessor finish + gap). Predecessors, gaps and after_finish are replay control and
+        # stay in these tables: the scheduler's Req keeps total_request, the clock fields,
+        # session_id, step and trigger.
+        self.waiting: dict[
+            tuple[str, int], tuple[Any, dict[tuple[str, int], float]]
+        ] = {}
+        self.dependents: dict[tuple[str, int], list[tuple[str, int]]] = {}
+        self.finished_at: dict[tuple[str, int], float] = {}
+        self.after_finish: dict[tuple[str, int], dict] = {}
+        self.received = (
+            0  # generate requests with simulation parameters, waiting ones included
+        )
+        self.total_request = 0
         self.offline_recv_all_requests = False
         self.profile_active = False
 
@@ -122,6 +137,12 @@ class ReqDispatcher:
     def reset(self) -> None:
         self.immediate_release_requests.clear()
         self.future_queue.clear()
+        self.waiting.clear()
+        self.dependents.clear()
+        self.finished_at.clear()
+        self.after_finish.clear()
+        self.received = 0
+        self.total_request = 0
         self.arrival_seq = 0
         self.offline_recv_all_requests = False
 
@@ -160,6 +181,26 @@ class ReqDispatcher:
                         "Add request to waiting queue with custom queue start timestamp."
                     )
 
+                self.received += 1
+                self.total_request = sim_params["total_request"]
+                wait_for = sim_params.pop("wait_for", None)
+                after_finish = sim_params.pop("after_finish", None)
+                if sim_params.get("session_id") is not None:
+                    key = (sim_params["session_id"], sim_params.get("step", 0))
+                    if after_finish is not None:
+                        self.after_finish[key] = after_finish
+                    if wait_for:
+                        gaps = {
+                            (p["session_id"], p["step"]): p["gap_s"] for p in wait_for
+                        }
+                        self.waiting[key] = (req, gaps)
+                        for predecessor in gaps:
+                            self.dependents.setdefault(predecessor, []).append(key)
+                        continue
+                elif wait_for:
+                    raise ValueError(
+                        f"request {req.rid} has wait_for but no session_id"
+                    )
                 self.arrival_seq += 1
                 self.future_queue.append(
                     (
@@ -170,20 +211,46 @@ class ReqDispatcher:
                     )
                 )
 
-            if len(self.future_queue) != 0:
-                _, _, gen_req = self.future_queue[-1]
-                total_request = gen_req.sampling_params.custom_params["simulation"][
-                    "total_request"
-                ]
-
-                if len(self.future_queue) == total_request:
+            if self.received != 0:
+                if self.received == self.total_request:
                     self.offline_recv_all_requests = True
                     heapq.heapify(self.future_queue)
                     logger.info("All requests received. Starting simulation now.")
                 else:
                     logger.info(
-                        f"Offline simulation mode enabled. {total_request} requests expected in total. Received {len(self.future_queue)} requests so far."
+                        f"Offline simulation mode enabled. {self.total_request} requests expected in total. Received {self.received} requests so far."
                     )
+
+    def on_finished(self, req, finished_at: float) -> None:
+        """A request finished at logical time `finished_at`: attach its after_finish and release
+        the requests whose predecessors have now all finished, each at the latest of
+        (predecessor finish + gap). `req` is the scheduler's Req, whose sampling params carry
+        the simulation parameters the request was submitted with."""
+        sim_params = (req.sampling_params.custom_params or {}).get("simulation")
+        if not sim_params or sim_params.get("session_id") is None:
+            return
+        key = (sim_params["session_id"], sim_params.get("step", 0))
+        self.finished_at[key] = finished_at
+        after_finish = self.after_finish.pop(key, None)
+        if after_finish is not None:
+            req.after_finish = after_finish
+        for dependent in self.dependents.pop(key, ()):
+            waiting_req, gaps = self.waiting[dependent]
+            if any(predecessor not in self.finished_at for predecessor in gaps):
+                continue
+            del self.waiting[dependent]
+            params = waiting_req.sampling_params.custom_params["simulation"]
+            params["created_time"] = max(
+                self.finished_at[predecessor] + gap for predecessor, gap in gaps.items()
+            )
+            params.pop(
+                "created_time_ms", None
+            )  # would take precedence over created_time
+            self.arrival_seq += 1
+            heapq.heappush(
+                self.future_queue,
+                (params["created_time"], self.arrival_seq, waiting_req),
+            )
 
     def dispatch(self) -> list:
         recv_reqs = []
@@ -221,6 +288,9 @@ class ReqDispatcher:
                 req_stats.rid = req.rid
                 req_stats.input_length = len(req.input_ids)
                 req_stats.output_length = req.sampling_params.max_new_tokens
+                req_stats.session_id = simulation_args.get("session_id")
+                req_stats.step = simulation_args.get("step", 0)
+                req_stats.trigger = simulation_args.get("trigger")
 
                 if self.mode == SimulationMode.BLOCKING:
                     req_stats.created_time = simulation_args.get(
@@ -284,7 +354,9 @@ class C_SchedulerHook(BaseHook):
 
     SIMULATION_BATCH: SimulationScheduleBatch = None
     OVERLAP_SCHEDULE: bool = False
-    CPU_OVERHEAD_S = None  # sim_config scheduler.cpu_overhead_s; None = measured host time
+    CPU_OVERHEAD_S = (
+        None  # sim_config scheduler.cpu_overhead_s; None = measured host time
+    )
     SIM_MODE = SimulationMode(Envs.simulation_mode())
     # Shared singleton instance with `C_SchedulerRequestReceiver.REQ_DISPATCHER`.
     REQ_DISPATCHER = ReqDispatcher(SIM_MODE)
@@ -512,7 +584,9 @@ class C_SchedulerHook(BaseHook):
                 cpu_overhead = C_SchedulerHook.CPU_OVERHEAD_S
                 if cpu_overhead is None:
                     cpu_overhead = max(
-                        now - StateManager.get_last_real_time_ts() - blocked_l2_wall_dur,
+                        now
+                        - StateManager.get_last_real_time_ts()
+                        - blocked_l2_wall_dur,
                         0.0,
                     )
                 StateManager.step_global_clock(cpu_overhead)
@@ -528,6 +602,10 @@ class C_SchedulerHook(BaseHook):
                             - req_stats.last_event_time  # queue duration
                         )
                         req_stats.last_event_time = request_response_time
+                        if req.finished():
+                            C_SchedulerHook.REQ_DISPATCHER.on_finished(
+                                req, request_response_time
+                            )
                     else:
                         # Chunked request: nothing to do
                         pass

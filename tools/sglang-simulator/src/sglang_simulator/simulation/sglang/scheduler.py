@@ -542,7 +542,10 @@ class C_SchedulerHook(BaseHook):
                         forward_latency = now - StateManager.get_last_real_time_ts()
                         StateManager.set_last_real_time_ts(now)
                     else:
-                        forward_latency = predicted_latency
+                        # A learned predictor can return a value below zero for a batch
+                        # shape outside its training data; the logical clock must not
+                        # run backward.
+                        forward_latency = max(predicted_latency, 0.0)
 
                     StateManager.set_current_inference_dur(forward_latency)
 

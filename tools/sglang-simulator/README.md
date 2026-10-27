@@ -82,6 +82,9 @@ The maintained tests define the supported first-version scope:
   release of requests with predecessors, driven without an engine: release times,
   the order of requests released together, `req.after_finish`, and that the
   replay-control params never stay on a request.
+- [`test/test_simulation_negative_latency.py`](test/test_simulation_negative_latency.py):
+  a predictor that returns a latency below zero never moves the `OFFLINE` clock
+  backward (every token latency is at least `cpu_overhead_s`).
 
 From `tools/sglang-simulator`:
 
@@ -90,6 +93,7 @@ python3 -m pytest -q test/test_simulation_sglang_runner.py
 python3 -m pytest -q test/test_simulation_sglang_serving.py
 python3 -m pytest -q test/test_simulation_closed_loop.py
 python3 -m pytest -q test/test_req_dispatcher.py
+python3 -m pytest -q test/test_simulation_negative_latency.py
 ```
 
 Read these tests as the minimal maintained examples for constructing a dataset,

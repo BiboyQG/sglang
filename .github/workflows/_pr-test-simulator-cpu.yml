@@ -99,3 +99,4 @@ jobs:
           python3 -m pytest -q tools/sglang-simulator/test/test_simulation_offline_repeatable.py
           python3 -m pytest -q tools/sglang-simulator/test/test_simulation_closed_loop.py
           python3 -m pytest -q tools/sglang-simulator/test/test_req_dispatcher.py
+          python3 -m pytest -q tools/sglang-simulator/test/test_simulation_negative_latency.py

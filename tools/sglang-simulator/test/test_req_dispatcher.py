@@ -185,3 +185,39 @@ def test_after_finish_is_on_the_request_when_its_kv_cache_is_released():
         assert not dispatcher.after_finish
     finally:
         batch_result_processor.release_kv_cache = original
+
+
+def test_scheduler_clock_is_the_logical_clock_in_offline_mode():
+    """After the hook in OFFLINE mode, mem_cache.common.scheduler_clock reads the simulator's
+    global clock, whichever way a caller imported it."""
+    import importlib
+
+    from sglang.srt.mem_cache.common import scheduler_clock
+    from sglang_simulator.simulation.sglang import scheduler as sim_scheduler
+
+    common = importlib.import_module("sglang.srt.mem_cache.common")
+    batch_result_processor = importlib.import_module(
+        "sglang.srt.managers.scheduler_components.batch_result_processor"
+    )
+    original_clock = common._clock
+    original_mode = sim_scheduler.C_SchedulerHook.SIM_MODE
+    original_release = batch_result_processor.release_kv_cache
+
+    class Target:  # the scheduler class the hook patches; only the attributes the hook reads
+        def __init__(self):
+            pass
+
+        recv_requests = _prefetch_kvcache = get_new_batch_prefill = run_batch = None
+        process_batch_result = event_loop_normal = init_request_dispatcher = None
+
+    try:
+        sim_scheduler.C_SchedulerHook.SIM_MODE = SimulationMode.OFFLINE
+        sim_scheduler.C_SchedulerHook.hook(Target)
+        StateManager.set_global_clock(12.5)
+        assert scheduler_clock() == common.scheduler_clock() == 12.5
+        StateManager.set_global_clock(13.0)
+        assert scheduler_clock() == 13.0
+    finally:
+        common._clock = original_clock
+        sim_scheduler.C_SchedulerHook.SIM_MODE = original_mode
+        batch_result_processor.release_kv_cache = original_release

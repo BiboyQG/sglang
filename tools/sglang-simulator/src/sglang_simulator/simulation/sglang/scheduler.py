@@ -745,6 +745,12 @@ class C_SchedulerHook(BaseHook):
             return original_release_kv_cache(req, tree_cache, checkpoint=checkpoint)
 
         batch_result_processor.release_kv_cache = wrapped_release_kv_cache
+        if cls.SIM_MODE == SimulationMode.OFFLINE:
+            # Scheduling and cache rules read durations from mem_cache.common.scheduler_clock;
+            # in a replay that is the logical clock, not the host's.
+            importlib.import_module("sglang.srt.mem_cache.common")._clock = (
+                StateManager.get_global_clock
+            )
         target.event_loop_overlap = override_event_loop_overlap
         target.__init__ = wrapped_init
         target.get_new_batch_prefill = wrapped_get_new_batch_prefill

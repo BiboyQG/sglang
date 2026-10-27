@@ -80,8 +80,9 @@ The maintained tests define the supported first-version scope:
   incomplete or cyclic is rejected.
 - [`test/test_req_dispatcher.py`](test/test_req_dispatcher.py): the hold and
   release of requests with predecessors, driven without an engine: release times,
-  the order of requests released together, `req.after_finish`, and that the
-  replay-control params never stay on a request.
+  the order of requests released together, `req.after_finish`, that the
+  replay-control params never stay on a request, and that
+  `mem_cache.common.scheduler_clock` reads the logical clock in `OFFLINE` mode.
 - [`test/test_simulation_negative_latency.py`](test/test_simulation_negative_latency.py):
   a predictor that returns a latency below zero never moves the `OFFLINE` clock
   backward (every token latency is at least `cpu_overhead_s`).
@@ -285,6 +286,11 @@ the request is queued or running the attribute is not there.
 `wait_for` and `after_finish` never reach the scheduler's `Req` before that: the
 dispatcher removes them from the simulation params when the request is received, so a
 scheduling policy sees only what a real server would.
+Code that needs a duration (a time-to-live, an age) reads
+`sglang.srt.mem_cache.common.scheduler_clock()`: `time.monotonic` on a real server, the
+logical clock in an `OFFLINE` replay (`BLOCKING` keeps the monotonic clock). Read inside
+`process_batch_result`, at KV release for example, the replay clock has not yet advanced by
+the step that just ran, while the server's clock has.
 
 The runner rejects a dataset whose waits name a key that is not in it, form a cycle,
 carry a negative `gap_s`, or come without a `session_id`, and a dataset in which two

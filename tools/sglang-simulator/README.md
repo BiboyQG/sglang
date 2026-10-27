@@ -221,7 +221,7 @@ Supported predictors:
 | Predictor | Purpose |
 |---|---|
 | `aiconfigurator` | Operator and module performance-database estimation. |
-| `ml` | A trained sklearn-compatible 18-feature latency model. |
+| `ml` | A HistGradientBoosting latency model trained on the 18-feature batch representation. |
 | `replay` | Exact or nearest-neighbor batch-composition replay. |
 
 Relative predictor paths are resolved from the simulator configuration location.

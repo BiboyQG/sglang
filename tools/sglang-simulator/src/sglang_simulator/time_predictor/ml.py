@@ -1,7 +1,7 @@
 """ML-trained per-iter latency predictor.
 
-Loads a joblib pickle of a sklearn-compatible regressor and predicts forward latency
-from batch composition features. Train one with `sglang-simulator-train`.
+Loads a joblib pickle of a sklearn HistGradientBoostingRegressor and predicts forward
+latency from batch composition features. Train one with `sglang-simulator-train`.
 
 sim_config.json usage:
     "predictor": {
@@ -22,14 +22,26 @@ from sglang_simulator.time_predictor.ml_features import (
     extract_ml_features,
 )
 from sglang_simulator.utils import get_logger
+from sklearn.ensemble import HistGradientBoostingRegressor
 
 logger = get_logger("sgl_simulator")
 
 
 class MLTimePredictor(InferTimePredictor):
-    """Predict forward latency using the shared 18-feature batch representation."""
+    """Predict forward latency using the shared 18-feature batch representation.
 
-    # Feature order is shared by training and inference, regardless of regressor.
+    The trees are walked from the model's node arrays instead of calling
+    ``model.predict``: a simulation makes one prediction per scheduled batch, and
+    ``predict`` on a one-row input spends milliseconds on input validation and on
+    one predictor call per tree, each allocating an output array and entering an
+    OpenMP region, while the walk itself takes microseconds.
+    For the models the trainer produces (squared-error and quantile losses, whose
+    link is the identity) the walk reproduces ``predict`` exactly: the same leaf
+    values are summed in the same order. This ties the class to the node layout of
+    the scikit-learn version the model was trained with.
+    """
+
+    # Feature order is shared by training and inference.
     FEATURE_NAMES = list(ML_FEATURE_NAMES)
 
     def __init__(
@@ -59,7 +71,7 @@ class MLTimePredictor(InferTimePredictor):
                 "MLTimePredictor requires a joblib bundle containing both "
                 "'model' and ordered 'features' metadata"
             )
-        self._model = bundle["model"]
+        model = bundle["model"]
         saved_features = list(bundle["features"])
 
         if saved_features != self.FEATURE_NAMES:
@@ -68,16 +80,34 @@ class MLTimePredictor(InferTimePredictor):
                 f"saved={saved_features}, expected={self.FEATURE_NAMES}. "
                 "Retrain or export the model with the exact 18-feature ABI."
             )
-        if not callable(getattr(self._model, "predict", None)):
+        if not isinstance(model, HistGradientBoostingRegressor):
             raise TypeError(
-                "MLTimePredictor model must expose a callable predict() method"
+                "MLTimePredictor evaluates sklearn HistGradientBoostingRegressor "
+                f"trees; the bundle holds {type(model).__name__}"
+            )
+
+        # Python lists index faster than numpy scalars in the per-node loop below.
+        self._baseline = float(model._baseline_prediction[0, 0])
+        self._trees = []
+        for (tree,) in model._predictors:  # one tree per iteration for regression
+            nodes = tree.nodes
+            self._trees.append(
+                (
+                    nodes["is_leaf"].tolist(),
+                    nodes["feature_idx"].tolist(),
+                    nodes["num_threshold"].tolist(),
+                    nodes["left"].tolist(),
+                    nodes["right"].tolist(),
+                    nodes["value"].tolist(),
+                )
             )
 
         self._latency_scale = float(latency_scale)
         logger.info(
-            "MLTimePredictor loaded from %s (model=%s, n_features=%d, latency_scale=%.4f)",
+            "MLTimePredictor loaded from %s (model=%s, n_trees=%d, n_features=%d, latency_scale=%.4f)",
             database_path,
-            type(self._model).__name__,
+            type(model).__name__,
+            len(self._trees),
             len(saved_features),
             self._latency_scale,
         )
@@ -91,4 +121,14 @@ class MLTimePredictor(InferTimePredictor):
 
         feats = extract_ml_features(exts, pasts)
 
-        return float(self._model.predict([feats])[0]) * self._latency_scale
+        # The features are finite, so the missing-value branch never applies.
+        latency = self._baseline
+        for is_leaf, feature_idx, threshold, left, right, value in self._trees:
+            node = 0
+            while not is_leaf[node]:
+                if feats[feature_idx[node]] <= threshold[node]:
+                    node = left[node]
+                else:
+                    node = right[node]
+            latency += value[node]
+        return latency * self._latency_scale

@@ -4,9 +4,8 @@
 from pathlib import Path
 
 import joblib
-import numpy as np
-from sglang_simulator.time_predictor.ml import MLTimePredictor
-from sklearn.dummy import DummyRegressor
+from sglang_simulator.time_predictor.ml_features import ML_FEATURE_NAMES
+from sglang_simulator.tools.train_ml_time_predictor import train as trainer
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
@@ -16,10 +15,14 @@ ASSETS = Path(__file__).parent / "assets"
 
 
 def build_ml_model() -> None:
-    model = DummyRegressor(strategy="constant", constant=0.001)
-    model.fit(np.zeros((1, len(MLTimePredictor.FEATURE_NAMES))), [0.001])
+    """The trainer's own model type on its example steps; illustrative, not calibrated."""
+    example = Path(trainer.__file__).with_name("example_steps.jsonl")
+    rows, _ = trainer.load_rows([example], {1}, 30.0)
     joblib.dump(
-        {"model": model, "features": MLTimePredictor.FEATURE_NAMES},
+        {
+            "model": trainer.train_model(rows, "l2", 0),
+            "features": list(ML_FEATURE_NAMES),
+        },
         ASSETS / "model.pkl",
     )
 

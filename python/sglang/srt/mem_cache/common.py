@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from array import array
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Optional, cast
 
@@ -33,6 +34,18 @@ if TYPE_CHECKING:
     from sglang.srt.mem_cache.unified_radix_cache import UnifiedRadixCache
 
 logger = logging.getLogger(__name__)
+
+
+_clock = time.monotonic  # the simulator points this at its logical clock in an OFFLINE replay
+
+
+def scheduler_clock() -> float:
+    """Seconds on the scheduler's clock, for scheduling and cache rules that need a duration
+    (a time-to-live, an age): the monotonic clock on the real server, the logical clock in an
+    OFFLINE replay, so a rule written against it behaves the same in both. Read inside
+    process_batch_result (at a request's KV release, for example) the replay clock has not
+    yet advanced by the step that just ran; the server's clock has."""
+    return _clock()
 
 
 class RetractionBackup(NamedTuple):

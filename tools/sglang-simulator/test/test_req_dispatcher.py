@@ -83,14 +83,19 @@ def test_requests_are_released_when_all_predecessors_finished():
         ("p/x", 1),
         ("p/y", 0),
     ]
-    # Replay control never reaches the scheduler: only the key and the clock stay on the request.
+    # Replay control never reaches the scheduler: the key, the clock and after_finish stay on the
+    # request.
     for req in reqs.values():
         assert set(req.sampling_params.custom_params["simulation"]) <= {
             "total_request",
             "created_time",
             "session_id",
             "step",
+            "after_finish",
         }
+    assert reqs["p0"].sampling_params.custom_params["simulation"]["after_finish"] == {
+        "finish_reason": "tool_calls"
+    }
 
     StateManager.set_global_clock(0.05)
     assert [req.rid for req in dispatcher.dispatch()] == ["a0", "open", "p0"]
@@ -102,8 +107,6 @@ def test_requests_are_released_when_all_predecessors_finished():
 
     dispatcher.on_finished(reqs["p0"], 0.2)
     assert not hasattr(reqs["p0"], "after_finish")  # attached at KV release, not at finish
-    dispatcher.attach_after_finish(reqs["p0"])
-    assert reqs["p0"].after_finish == {"finish_reason": "tool_calls"}
     assert (
         _created_time(reqs["px0"]) == 0.2 + 0.01
         and _created_time(reqs["py0"]) == 0.2 + 0.01
@@ -132,59 +135,51 @@ def test_requests_are_released_when_all_predecessors_finished():
     StateManager.set_global_clock(1.0)
     # Released requests are dispatched by created_time.
     assert [req.rid for req in dispatcher.dispatch()] == ["px1", "p1", "a2"]
-    assert (
-        not dispatcher.waiting
-        and not dispatcher.dependents
-        and not dispatcher.after_finish
-    )
+    assert not dispatcher.waiting and not dispatcher.dependents
 
 
-def test_after_finish_is_on_the_request_when_its_kv_cache_is_released():
-    """The hook wraps the batch result processor's release_kv_cache: the request carries its
-    after_finish before the original release runs."""
-    import importlib
+def test_after_finish_is_on_the_finished_request_when_its_kv_cache_is_released():
+    """release_kv_cache puts the request's after_finish on it before the tree's first call
+    (claim_kv_row), and only once the request finished."""
+    from sglang.srt.mem_cache.common import release_kv_cache
 
-    from sglang_simulator.simulation.sglang.scheduler import C_SchedulerHook
+    class _Kv:
+        holds_kv = True
+        is_kv_released = False
 
-    batch_result_processor = importlib.import_module(
-        "sglang.srt.managers.scheduler_components.batch_result_processor"
-    )
-    seen = []
-    original = batch_result_processor.release_kv_cache
+    class _Req:
+        def __init__(self, finished: bool, after_finish=None):
+            self._finished = finished
+            self.kv = _Kv()
+            simulation = {"session_id": "p", "step": 0, "created_time": 0.0}
+            if after_finish is not None:
+                simulation["after_finish"] = after_finish
+            self.sampling_params = _SamplingParams(simulation)
 
-    def record_release(req, tree_cache, *, checkpoint):
-        seen.append((req.rid, getattr(req, "after_finish", None), checkpoint))
+        def finished(self) -> bool:
+            return self._finished
 
-    batch_result_processor.release_kv_cache = record_release
-
-    class Target:  # the scheduler class the hook patches; only the attributes the hook reads
+    class _Tree:  # claims the row so the release returns right after that call
         def __init__(self):
-            pass
+            self.seen = []
 
-        recv_requests = _prefetch_kvcache = get_new_batch_prefill = run_batch = None
-        process_batch_result = event_loop_normal = init_request_dispatcher = None
-        event_loop_overlap = None
+        def claim_kv_row(self, req) -> bool:
+            self.seen.append(getattr(req, "after_finish", None))
+            req.kv.holds_kv = False
+            return True
 
-    try:
-        C_SchedulerHook.hook(Target)
-        dispatcher = C_SchedulerHook.REQ_DISPATCHER
-        dispatcher.mode = SimulationMode.OFFLINE
-        dispatcher.reset()
-        req = TokenizedGenerateReqInput(
-            "p0",
-            total_request=1,
-            session_id="p",
-            step=0,
-            created_time=0.0,
-            after_finish={"finish_reason": "stop", "tool_categories": []},
-        )
-        dispatcher.add([req])
-        assert not hasattr(req, "after_finish")
-        batch_result_processor.release_kv_cache(req, None, checkpoint=True)
-        assert seen == [("p0", {"finish_reason": "stop", "tool_categories": []}, True)]
-        assert not dispatcher.after_finish
-    finally:
-        batch_result_processor.release_kv_cache = original
+    finished, running = (
+        _Req(True, {"finish_reason": "stop", "tool_categories": []}),
+        _Req(False, {"finish_reason": "stop", "tool_categories": []}),
+    )
+    tree = _Tree()
+    release_kv_cache(finished, tree, checkpoint=True)
+    release_kv_cache(running, tree, checkpoint=False)  # a retraction
+    assert tree.seen == [{"finish_reason": "stop", "tool_categories": []}, None]
+    assert not hasattr(running, "after_finish")
+    without = _Req(True)
+    release_kv_cache(without, tree, checkpoint=True)
+    assert not hasattr(without, "after_finish")
 
 
 def test_scheduler_clock_is_the_logical_clock_in_offline_mode():
@@ -196,12 +191,8 @@ def test_scheduler_clock_is_the_logical_clock_in_offline_mode():
     from sglang_simulator.simulation.sglang import scheduler as sim_scheduler
 
     common = importlib.import_module("sglang.srt.mem_cache.common")
-    batch_result_processor = importlib.import_module(
-        "sglang.srt.managers.scheduler_components.batch_result_processor"
-    )
     original_clock = common._clock
     original_mode = sim_scheduler.C_SchedulerHook.SIM_MODE
-    original_release = batch_result_processor.release_kv_cache
 
     class Target:  # the scheduler class the hook patches; only the attributes the hook reads
         def __init__(self):
@@ -220,4 +211,3 @@ def test_scheduler_clock_is_the_logical_clock_in_offline_mode():
     finally:
         common._clock = original_clock
         sim_scheduler.C_SchedulerHook.SIM_MODE = original_mode
-        batch_result_processor.release_kv_cache = original_release

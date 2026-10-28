@@ -80,8 +80,9 @@ The maintained tests define the supported first-version scope:
   incomplete or cyclic is rejected.
 - [`test/test_req_dispatcher.py`](test/test_req_dispatcher.py): the hold and
   release of requests with predecessors, driven without an engine: release times,
-  the order of requests released together, `req.after_finish`, that the
-  replay-control params never stay on a request, and that
+  the order of requests released together, that the replay-control params never
+  stay on a request, that `req.after_finish` is on a finished request when
+  `release_kv_cache` hands it to the tree, and that
   `mem_cache.common.scheduler_clock` reads the logical clock in `OFFLINE` mode.
 - [`test/test_simulation_negative_latency.py`](test/test_simulation_negative_latency.py):
   a predictor that returns a latency below zero never moves the `OFFLINE` clock
@@ -278,14 +279,18 @@ so runs repeat exactly when `scheduler.cpu_overhead_s` is set.
 
 Two more custom params are optional. `trigger` is a label (for example `root`, `user`,
 `tool`, `subagent`) copied to `request.jsonl` next to `session_id` and `step`.
-`after_finish` is a dict that the scheduler attaches to the request as
-`req.after_finish` right before the finished request's KV cache is released (inside
-`process_batch_result`), the way a real server knows at that moment whether the reply
-calls a tool, so code that decides at KV release time what to keep can read it; while
-the request is queued or running the attribute is not there.
-`wait_for` and `after_finish` never reach the scheduler's `Req` before that: the
-dispatcher removes them from the simulation params when the request is received, so a
-scheduling policy sees only what a real server would.
+`after_finish` is a dict (how the step ended: `finish_reason`, `tool_categories`) that
+`sglang.srt.mem_cache.common.release_kv_cache` puts on the finished request as
+`req.after_finish` right before the tree keeps or frees its KV cache, the way a real
+server knows at that moment whether the reply calls a tool, so code that decides at KV
+release time what to keep can read it there; while the request is queued or running the
+attribute is not there. A real server given the same `custom_params` attaches it the
+same way. The dict is in the request's simulation params from arrival on, so a scheduling
+policy reads `req.after_finish` and not the params, to see the ending only once the request
+finished.
+In an `OFFLINE` replay the dispatcher removes `wait_for` from the simulation params when
+the request is received, so it never reaches the scheduler's `Req`; a real server (and
+`BLOCKING` mode) keeps it in the params and nothing reads it.
 Code that needs a duration (a time-to-live, an age) reads
 `sglang.srt.mem_cache.common.scheduler_clock()`: `time.monotonic` on a real server, the
 logical clock in an `OFFLINE` replay (`BLOCKING` keeps the monotonic clock). Read inside

@@ -106,15 +106,14 @@ class ReqDispatcher:
         self.arrival_seq = 0
         # Closed-loop sessions: a request with predecessors waits here, keyed by (session_id, step),
         # until every predecessor finished; it then joins the future queue at the latest of
-        # (predecessor finish + gap). Predecessors, gaps and after_finish are replay control and
-        # stay in these tables: the scheduler's Req keeps total_request, the clock fields,
-        # session_id, step and trigger.
+        # (predecessor finish + gap). Predecessors and gaps are replay control and stay in these
+        # tables: the scheduler's Req keeps total_request, the clock fields, session_id, step,
+        # trigger and after_finish.
         self.waiting: dict[
             tuple[str, int], tuple[Any, dict[tuple[str, int], float]]
         ] = {}
         self.dependents: dict[tuple[str, int], list[tuple[str, int]]] = {}
         self.finished_at: dict[tuple[str, int], float] = {}
-        self.after_finish: dict[tuple[str, int], dict] = {}
         self.received = (
             0  # generate requests with simulation parameters, waiting ones included
         )
@@ -140,7 +139,6 @@ class ReqDispatcher:
         self.waiting.clear()
         self.dependents.clear()
         self.finished_at.clear()
-        self.after_finish.clear()
         self.received = 0
         self.total_request = 0
         self.arrival_seq = 0
@@ -184,11 +182,8 @@ class ReqDispatcher:
                 self.received += 1
                 self.total_request = sim_params["total_request"]
                 wait_for = sim_params.pop("wait_for", None)
-                after_finish = sim_params.pop("after_finish", None)
                 if sim_params.get("session_id") is not None:
                     key = (sim_params["session_id"], sim_params.get("step", 0))
-                    if after_finish is not None:
-                        self.after_finish[key] = after_finish
                     if wait_for:
                         gaps = {
                             (p["session_id"], p["step"]): p["gap_s"] for p in wait_for
@@ -220,19 +215,6 @@ class ReqDispatcher:
                     logger.info(
                         f"Offline simulation mode enabled. {self.total_request} requests expected in total. Received {self.received} requests so far."
                     )
-
-    def attach_after_finish(self, req) -> None:
-        """Put the request's after_finish (how the step ended: finish reason, tool categories) on
-        the scheduler's Req. Called right before the request's KV cache is released, so a policy
-        that decides at release time what to keep can read it."""
-        sim_params = (req.sampling_params.custom_params or {}).get("simulation")
-        if not sim_params or sim_params.get("session_id") is None:
-            return
-        after_finish = self.after_finish.pop(
-            (sim_params["session_id"], sim_params.get("step", 0)), None
-        )
-        if after_finish is not None:
-            req.after_finish = after_finish
 
     def on_finished(self, req, finished_at: float) -> None:
         """A request finished at logical time `finished_at`: release the requests whose
@@ -732,19 +714,6 @@ class C_SchedulerHook(BaseHook):
                         _request_dispatcher._mapping[ty] = override_profile
             return ret
 
-        # The scheduler releases a finished request's KV cache inside process_batch_result, before
-        # on_finished runs; after_finish goes on the Req just before that release, where a policy
-        # deciding what to keep can read it.
-        batch_result_processor = importlib.import_module(
-            "sglang.srt.managers.scheduler_components.batch_result_processor"
-        )
-        original_release_kv_cache = batch_result_processor.release_kv_cache
-
-        def wrapped_release_kv_cache(req, tree_cache, *, checkpoint):
-            cls.REQ_DISPATCHER.attach_after_finish(req)
-            return original_release_kv_cache(req, tree_cache, checkpoint=checkpoint)
-
-        batch_result_processor.release_kv_cache = wrapped_release_kv_cache
         if cls.SIM_MODE == SimulationMode.OFFLINE:
             # Scheduling and cache rules read durations from mem_cache.common.scheduler_clock;
             # in a replay that is the logical clock, not the host's.

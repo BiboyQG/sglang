@@ -391,6 +391,15 @@ def discard_kv_cache_backup(
 def release_kv_cache(req: Req, tree_cache: BasePrefixCache, *, checkpoint: bool):
     """Give the request's kv row back; with ``checkpoint`` the tree first keeps
     what it can key."""
+    if req.finished():
+        # How the step ended (finish reason, tool categories) comes with the request; it goes on
+        # the finished request before the tree keeps or frees its KV cache, where a rule that
+        # decides what to keep reads it.
+        after_finish = (
+            (req.sampling_params.custom_params or {}).get("simulation") or {}
+        ).get("after_finish")
+        if after_finish is not None:
+            req.after_finish = after_finish
     assert (not req.kv.holds_kv) == req.kv.is_kv_released
     # A mamba-capable cache may alloc mamba state before alloc KV cache
     if not req.kv.holds_kv:

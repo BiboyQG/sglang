@@ -101,6 +101,8 @@ def test_requests_are_released_when_all_predecessors_finished():
     dispatcher.on_finished(reqs["open"], 0.11)  # no key: nothing to release
 
     dispatcher.on_finished(reqs["p0"], 0.2)
+    assert not hasattr(reqs["p0"], "after_finish")  # attached at KV release, not at finish
+    dispatcher.attach_after_finish(reqs["p0"])
     assert reqs["p0"].after_finish == {"finish_reason": "tool_calls"}
     assert (
         _created_time(reqs["px0"]) == 0.2 + 0.01
@@ -135,3 +137,51 @@ def test_requests_are_released_when_all_predecessors_finished():
         and not dispatcher.dependents
         and not dispatcher.after_finish
     )
+
+
+def test_after_finish_is_on_the_request_when_its_kv_cache_is_released():
+    """The hook wraps the batch result processor's release_kv_cache: the request carries its
+    after_finish before the original release runs."""
+    import importlib
+
+    from sglang_simulator.simulation.sglang.scheduler import C_SchedulerHook
+
+    batch_result_processor = importlib.import_module(
+        "sglang.srt.managers.scheduler_components.batch_result_processor"
+    )
+    seen = []
+    original = batch_result_processor.release_kv_cache
+
+    def record_release(req, tree_cache, *, checkpoint):
+        seen.append((req.rid, getattr(req, "after_finish", None), checkpoint))
+
+    batch_result_processor.release_kv_cache = record_release
+
+    class Target:  # the scheduler class the hook patches; only the attributes the hook reads
+        def __init__(self):
+            pass
+
+        recv_requests = _prefetch_kvcache = get_new_batch_prefill = run_batch = None
+        process_batch_result = event_loop_normal = init_request_dispatcher = None
+        event_loop_overlap = None
+
+    try:
+        C_SchedulerHook.hook(Target)
+        dispatcher = C_SchedulerHook.REQ_DISPATCHER
+        dispatcher.mode = SimulationMode.OFFLINE
+        dispatcher.reset()
+        req = TokenizedGenerateReqInput(
+            "p0",
+            total_request=1,
+            session_id="p",
+            step=0,
+            created_time=0.0,
+            after_finish={"finish_reason": "stop", "tool_categories": []},
+        )
+        dispatcher.add([req])
+        assert not hasattr(req, "after_finish")
+        batch_result_processor.release_kv_cache(req, None, checkpoint=True)
+        assert seen == [("p0", {"finish_reason": "stop", "tool_categories": []}, True)]
+        assert not dispatcher.after_finish
+    finally:
+        batch_result_processor.release_kv_cache = original

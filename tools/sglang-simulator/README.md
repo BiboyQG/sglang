@@ -278,13 +278,13 @@ so runs repeat exactly when `scheduler.cpu_overhead_s` is set.
 Two more custom params are optional. `trigger` is a label (for example `root`, `user`,
 `tool`, `subagent`) copied to `request.jsonl` next to `session_id` and `step`.
 `after_finish` is a dict that the scheduler attaches to the request as
-`req.after_finish` when the request finished, the way a real server knows at that
-moment whether the reply calls a tool. It is set after the scheduler processed the
-request's last token, that is after the request's KV was released and its output
-streamed, so code that decides at KV release time cannot read it.
-`wait_for` and `after_finish` never reach the scheduler's `Req`: the dispatcher removes
-them from the simulation params when the request is received, so a scheduling policy
-sees only what a real server would.
+`req.after_finish` right before the finished request's KV cache is released (inside
+`process_batch_result`), the way a real server knows at that moment whether the reply
+calls a tool, so code that decides at KV release time what to keep can read it; while
+the request is queued or running the attribute is not there.
+`wait_for` and `after_finish` never reach the scheduler's `Req` before that: the
+dispatcher removes them from the simulation params when the request is received, so a
+scheduling policy sees only what a real server would.
 
 The runner rejects a dataset whose waits name a key that is not in it, form a cycle,
 carry a negative `gap_s`, or come without a `session_id`, and a dataset in which two

@@ -288,8 +288,9 @@ attribute is not there. A real server given the same `custom_params` attaches it
 same way. The dict is in the request's simulation params from arrival on, so a scheduling
 policy reads `req.after_finish` and not the params, to see the ending only once the request
 finished.
-`wait_for` never reaches the scheduler's `Req`: the dispatcher removes it from the
-simulation params when the request is received.
+In an `OFFLINE` replay the dispatcher removes `wait_for` from the simulation params when
+the request is received, so it never reaches the scheduler's `Req`; a real server (and
+`BLOCKING` mode) keeps it in the params and nothing reads it.
 Code that needs a duration (a time-to-live, an age) reads
 `sglang.srt.mem_cache.common.scheduler_clock()`: `time.monotonic` on a real server, the
 logical clock in an `OFFLINE` replay (`BLOCKING` keeps the monotonic clock). Read inside
